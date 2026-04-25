@@ -1,84 +1,102 @@
 package com.sentinel.ratelimiter.service;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
-import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
 
 /**
- * Token Bucket Rate Limiter
+ * Sliding-window rate limiter backed by a Redis sorted set + Lua script.
  *
- * Each client gets a "bucket" of tokens. Tokens refill over time at a fixed rate.
- * Each API request consumes one token. When the bucket is empty, the request is denied.
+ * <p>Uses a single atomic Lua script so that the ZREMRANGEBYSCORE → ZADD → ZCARD
+ * sequence is never split across two requests, eliminating the race condition
+ * present in the previous counter-increment approach.
  *
- * Redis keys per client:
- *   rate_limit:tokens:<clientId>      – current token count (float stored as string)
- *   rate_limit:last_refill:<clientId> – epoch-millis of the last refill timestamp
+ * <p>Key schema: {@code rate_limit:<clientId>}
+ *   - Sorted set where score = epoch-millis of each request timestamp
+ *   - Entries older than the window are pruned on every call (O(log n + k))
  */
 @Service
 public class RateLimiterService {
 
-    /** Maximum tokens a bucket can hold (burst capacity). */
-    public static final long MAX_TOKENS = 10;
-
-    /** Tokens added per second (sustained throughput = REFILL_RATE * 60 req/min). */
-    private static final double REFILL_RATE = 2.0; // 2 tokens/sec → 120 req/min
-
-    /** TTL for idle buckets – cleaned up after 10 minutes of inactivity. */
-    private static final Duration BUCKET_TTL = Duration.ofMinutes(10);
-
     private final StringRedisTemplate redisTemplate;
+
+    /** Maximum requests allowed inside the rolling window. */
+    private static final int MAX_REQUESTS = 100;
+
+    /** Rolling window size (60 seconds). */
+    private static final long WINDOW_MS = Duration.ofSeconds(60).toMillis();
+
+    /**
+     * Atomic sliding-window script.
+     *
+     * KEYS[1] = rate_limit:<clientId>
+     * ARGV[1] = current epoch-millis (string)
+     * ARGV[2] = window start epoch-millis (current - WINDOW_MS)
+     * ARGV[3] = max requests
+     * ARGV[4] = window size in ms  (used as TTL for the sorted set)
+     *
+     * Returns: {allowed (0|1), current_count}
+     */
+    private static final String SLIDING_WINDOW_SCRIPT = """
+            local key       = KEYS[1]
+            local now       = tonumber(ARGV[1])
+            local win_start = tonumber(ARGV[2])
+            local limit     = tonumber(ARGV[3])
+            local win_ms    = tonumber(ARGV[4])
+
+            -- 1. Evict timestamps outside the window
+            redis.call('ZREMRANGEBYSCORE', key, 0, win_start)
+
+            -- 2. Count remaining
+            local count = redis.call('ZCARD', key)
+
+            if count < limit then
+                -- 3. Record this request (score = timestamp, member = timestamp for uniqueness)
+                redis.call('ZADD', key, now, now .. '-' .. math.random(1, 1000000))
+                -- 4. Reset TTL so the key expires naturally after the window
+                redis.call('PEXPIRE', key, win_ms)
+                return {1, count + 1}
+            else
+                return {0, count}
+            end
+            """;
+
+    private final RedisScript<List<Long>> script;
 
     public RateLimiterService(StringRedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
+        this.script = RedisScript.of(SLIDING_WINDOW_SCRIPT, (Class<List<Long>>) (Class<?>) List.class);
     }
 
     /**
-     * Attempt to consume one token from the client's bucket.
+     * Checks whether {@code clientId} is within the rate limit.
      *
-     * @param clientId unique identifier for the calling client (e.g. IP address)
-     * @return remaining tokens after this request, or -1 if denied (bucket empty)
+     * @param clientId opaque client identifier (IP, API-key, user-id, …)
+     * @return {@link RateLimitDecision} containing allowed flag and current count
      */
-    public long isAllowed(String clientId) {
-        String tokenKey      = "rate_limit:tokens:"      + clientId;
-        String lastRefillKey = "rate_limit:last_refill:" + clientId;
+    public RateLimitDecision isAllowed(String clientId) {
+        long now      = System.currentTimeMillis();
+        long winStart = now - WINDOW_MS;
 
-        long nowMillis = Instant.now().toEpochMilli();
+        List<Long> result = redisTemplate.execute(
+                script,
+                Collections.singletonList("rate_limit:" + clientId),
+                String.valueOf(now),
+                String.valueOf(winStart),
+                String.valueOf(MAX_REQUESTS),
+                String.valueOf(WINDOW_MS)
+        );
 
-        String rawTokens     = redisTemplate.opsForValue().get(tokenKey);
-        String rawLastRefill = redisTemplate.opsForValue().get(lastRefillKey);
+        boolean allowed = result != null && result.get(0) == 1L;
+        long    count   = result != null ? result.get(1) : MAX_REQUESTS;
 
-        double currentTokens;
-        long   lastRefillMillis;
-
-        if (rawTokens == null || rawLastRefill == null) {
-            // First request from this client – start with a full bucket
-            currentTokens    = MAX_TOKENS;
-            lastRefillMillis = nowMillis;
-        } else {
-            currentTokens    = Double.parseDouble(rawTokens);
-            lastRefillMillis = Long.parseLong(rawLastRefill);
-        }
-
-        // Refill: add tokens proportional to time elapsed since last request
-        double elapsedSeconds = (nowMillis - lastRefillMillis) / 1000.0;
-        currentTokens = Math.min(MAX_TOKENS, currentTokens + elapsedSeconds * REFILL_RATE);
-
-        if (currentTokens < 1.0) {
-            // Bucket is empty – persist partially-refilled state and deny
-            persist(tokenKey, lastRefillKey, currentTokens, nowMillis);
-            return -1;
-        }
-
-        currentTokens -= 1.0;
-        persist(tokenKey, lastRefillKey, currentTokens, nowMillis);
-        return (long) currentTokens;
+        return new RateLimitDecision(allowed, (int) Math.max(0, MAX_REQUESTS - count));
     }
 
-    private void persist(String tokenKey, String lastRefillKey,
-                         double tokens, long timestampMillis) {
-        redisTemplate.opsForValue().set(tokenKey,      String.valueOf(tokens),         BUCKET_TTL);
-        redisTemplate.opsForValue().set(lastRefillKey, String.valueOf(timestampMillis), BUCKET_TTL);
-    }
+    /** Value object returned to callers so they can populate response headers. */
+    public record RateLimitDecision(boolean allowed, int remaining) {}
 }

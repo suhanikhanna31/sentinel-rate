@@ -6,96 +6,90 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 
 /**
- * Adaptive Abuse Detection Service
+ * Tracks rate-limit violations per client and applies exponentially escalating
+ * block durations to persistent abusers.
  *
- * Monitors each client for anomalous traffic patterns and dynamically throttles
- * (blocks) abusive clients.
+ * <p>Block schedule (cumulative violations → block duration):
+ * <ul>
+ *   <li>3+ violations → 10-minute block</li>
+ *   <li>6+ violations → 1-hour block</li>
+ *   <li>10+ violations → 24-hour block</li>
+ * </ul>
  *
- * Strategy:
- *   – Each rate-limit violation is counted in a short rolling window (5 min).
- *   – Once a client exceeds MAX_VIOLATIONS in that window, they are hard-blocked
- *     for BLOCK_DURATION.
- *   – The block duration doubles on repeat offences (adaptive throttling).
- *
- * Redis keys:
- *   abuse:count:<clientId>       – violation count in the rolling window
- *   abuse:block:<clientId>       – present when client is hard-blocked
- *   abuse:offence_count:<clientId> – number of times this client has been blocked
+ * <p>Key schema:
+ * <ul>
+ *   <li>{@code abuse:count:<clientId>}  – violation counter, TTL 10 min</li>
+ *   <li>{@code abuse:block:<clientId>}  – presence = blocked, TTL = block duration</li>
+ * </ul>
  */
 @Service
 public class AbuseDetectionService {
 
-    /** Violations within VIOLATION_WINDOW before a hard block is issued. */
-    private static final int MAX_VIOLATIONS = 3;
-
-    /** Rolling window for counting violations. */
-    private static final Duration VIOLATION_WINDOW = Duration.ofMinutes(5);
-
-    /** Base block duration – doubles with each repeated offence (adaptive). */
-    private static final Duration BASE_BLOCK_DURATION = Duration.ofMinutes(10);
-
-    /** Hard cap on block duration regardless of offence count. */
-    private static final Duration MAX_BLOCK_DURATION = Duration.ofHours(24);
-
     private final StringRedisTemplate redisTemplate;
+
+    private static final int      TIER_1_THRESHOLD = 3;
+    private static final int      TIER_2_THRESHOLD = 6;
+    private static final int      TIER_3_THRESHOLD = 10;
+
+    private static final Duration TIER_1_BLOCK     = Duration.ofMinutes(10);
+    private static final Duration TIER_2_BLOCK     = Duration.ofHours(1);
+    private static final Duration TIER_3_BLOCK     = Duration.ofHours(24);
+
+    /** How long the violation counter itself lives before resetting. */
+    private static final Duration VIOLATION_TTL    = Duration.ofMinutes(10);
 
     public AbuseDetectionService(StringRedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
     }
 
     /**
-     * @return true if the client is currently hard-blocked
+     * Returns {@code true} if the client is currently in a hard block period.
      */
     public boolean isBlocked(String clientId) {
         return Boolean.TRUE.equals(redisTemplate.hasKey("abuse:block:" + clientId));
     }
 
     /**
-     * Record one rate-limit violation for the given client.
-     * If violations exceed the threshold, the client is dynamically blocked.
+     * Records one violation for {@code clientId} and applies a block if the
+     * client has crossed a threshold.
      *
-     * @param clientId the offending client identifier
+     * @return the updated violation count
      */
-    public void recordViolation(String clientId) {
-        String violationKey = "abuse:count:" + clientId;
+    public long recordViolation(String clientId) {
+        String countKey = "abuse:count:" + clientId;
 
-        Long violationCount = redisTemplate.opsForValue().increment(violationKey);
+        Long count = redisTemplate.opsForValue().increment(countKey);
+        if (count == null) count = 1L;
 
-        // Start the rolling window on the first violation
-        if (violationCount != null && violationCount == 1) {
-            redisTemplate.expire(violationKey, VIOLATION_WINDOW);
+        // Refresh violation-counter TTL on every hit
+        redisTemplate.expire(countKey, VIOLATION_TTL);
+
+        // Apply the appropriate block tier
+        Duration blockDuration = resolveBlockDuration(count);
+        if (blockDuration != null) {
+            redisTemplate.opsForValue()
+                    .set("abuse:block:" + clientId, "BLOCKED", blockDuration);
         }
 
-        // Threshold crossed – issue an adaptive block
-        if (violationCount != null && violationCount >= MAX_VIOLATIONS) {
-            applyBlock(clientId);
-        }
+        return count;
     }
 
-    // ---- helpers ----
-
     /**
-     * Block the client. Duration doubles with each repeat offence up to MAX_BLOCK_DURATION.
+     * Manually lifts a block (useful for an admin unblock endpoint).
      */
-    private void applyBlock(String clientId) {
-        String offenceKey = "abuse:offence_count:" + clientId;
-        Long offenceCount = redisTemplate.opsForValue().increment(offenceKey);
-        // Keep the offence history for a long time so repeat offenders keep getting longer bans
-        redisTemplate.expire(offenceKey, Duration.ofDays(7));
+    public void unblock(String clientId) {
+        redisTemplate.delete("abuse:block:" + clientId);
+        redisTemplate.delete("abuse:count:" + clientId);
+    }
 
-        long blockMinutes = BASE_BLOCK_DURATION.toMinutes();
-        if (offenceCount != null && offenceCount > 1) {
-            // Exponential back-off: 10 min, 20 min, 40 min, … capped at MAX_BLOCK_DURATION
-            blockMinutes = Math.min(
-                    BASE_BLOCK_DURATION.toMinutes() * (1L << (offenceCount - 1)),
-                    MAX_BLOCK_DURATION.toMinutes()
-            );
-        }
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
 
-        redisTemplate.opsForValue().set(
-                "abuse:block:" + clientId,
-                "BLOCKED_OFFENCE_" + offenceCount,
-                Duration.ofMinutes(blockMinutes)
-        );
+    private Duration resolveBlockDuration(long violations) {
+        if (violations >= TIER_3_THRESHOLD) return TIER_3_BLOCK;
+        if (violations >= TIER_2_THRESHOLD) return TIER_2_BLOCK;
+        if (violations >= TIER_1_THRESHOLD) return TIER_1_BLOCK;
+        return null;
     }
 }

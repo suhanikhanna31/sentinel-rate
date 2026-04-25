@@ -1,21 +1,27 @@
 package com.sentinel.ratelimiter.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 /**
- * Service Contract / API Response DTO
+ * Unified API response for all rate-limit decisions.
  *
- * Returned by every rate-limiting endpoint. All microservices that integrate
- * with this service should parse this object to decide whether to proceed.
- *
- * Fields:
- *   allowed        – true if the request is permitted to continue
- *   remainingTokens – tokens left in the client's bucket after this request
- *   message        – human-readable status (useful for debugging integrations)
+ * <p>Fields:
+ * <ul>
+ *   <li>{@code allowed}         – whether the request was permitted</li>
+ *   <li>{@code remainingTokens} – requests remaining in the current window</li>
+ *   <li>{@code message}         – optional human-readable reason (null when omitted)</li>
+ * </ul>
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class RateLimitResponse {
 
-    private boolean allowed;
-    private long remainingTokens;
-    private String message;
+    private final boolean allowed;
+    private final long    remainingTokens;
+    private final String  message;
+
+    public RateLimitResponse(boolean allowed, long remainingTokens) {
+        this(allowed, remainingTokens, null);
+    }
 
     public RateLimitResponse(boolean allowed, long remainingTokens, String message) {
         this.allowed         = allowed;
@@ -23,17 +29,7 @@ public class RateLimitResponse {
         this.message         = message;
     }
 
-    // ---- Getters (required for JSON serialisation) ----
-
-    public boolean isAllowed() {
-        return allowed;
-    }
-
-    public long getRemainingTokens() {
-        return remainingTokens;
-    }
-
-    public String getMessage() {
-        return message;
-    }
+    public boolean isAllowed()         { return allowed; }
+    public long    getRemainingTokens(){ return remainingTokens; }
+    public String  getMessage()        { return message; }
 }
