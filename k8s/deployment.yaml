@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-rate
+  labels:
+    app: sentinel-rate
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sentinel-rate
+  template:
+    metadata:
+      labels:
+        app: sentinel-rate
+    spec:
+      containers:
+        - name: rate-limiter
+          image: sentinel-rate:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: sentinel-config
+                  key: redis.host
+            - name: SPRING_REDIS_PORT
+              value: "6379"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
