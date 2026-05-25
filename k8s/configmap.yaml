@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-config
+data:
+  redis.host: redis-service
+  rate.limit.requests: "100"
+  rate.limit.window.seconds: "60"
