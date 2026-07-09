@@ -20,12 +20,12 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: SPRING_REDIS_HOST
+            - name: SPRING_DATA_REDIS_HOST
               valueFrom:
                 configMapKeyRef:
                   name: sentinel-config
                   key: redis.host
-            - name: SPRING_REDIS_PORT
+            - name: SPRING_DATA_REDIS_PORT
               value: "6379"
           readinessProbe:
             httpGet:
