@@ -1,5 +1,6 @@
 package com.sentinel.ratelimiter.service;
 
+import com.sentinel.ratelimiter.config.RateLimitDefaults;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
@@ -24,18 +25,12 @@ public class RateLimiterService {
 
     private final StringRedisTemplate redisTemplate;
 
-    /** Maximum requests allowed inside the rolling window. */
-    private static final int MAX_REQUESTS = 100;
-
-    /** Rolling window size (60 seconds). */
-    private static final long WINDOW_MS = Duration.ofSeconds(60).toMillis();
-
     /**
      * Atomic sliding-window script.
      *
      * KEYS[1] = rate_limit:<clientId>
      * ARGV[1] = current epoch-millis (string)
-     * ARGV[2] = window start epoch-millis (current - WINDOW_MS)
+     * ARGV[2] = window start epoch-millis (current - window)
      * ARGV[3] = max requests
      * ARGV[4] = window size in ms  (used as TTL for the sorted set)
      *
@@ -73,28 +68,47 @@ public class RateLimiterService {
     }
 
     /**
-     * Checks whether {@code clientId} is within the rate limit.
+     * Checks whether {@code clientId} is within the default rate limit
+     * ({@link RateLimitDefaults#DEFAULT_MAX_REQUESTS} requests per
+     * {@link RateLimitDefaults#DEFAULT_WINDOW_SECONDS}s window).
      *
      * @param clientId opaque client identifier (IP, API-key, user-id, …)
      * @return {@link RateLimitDecision} containing allowed flag and current count
      */
     public RateLimitDecision isAllowed(String clientId) {
+        return isAllowed(clientId, RateLimitDefaults.DEFAULT_MAX_REQUESTS, RateLimitDefaults.DEFAULT_WINDOW_SECONDS);
+    }
+
+    /**
+     * Checks whether {@code clientId} is within a caller-supplied rate limit. This is what
+     * powers per-endpoint overrides: {@link com.sentinel.ratelimiter.aspect.RateLimitAspect}
+     * calls this directly with the values from a method's {@code @RateLimit} annotation,
+     * while {@link com.sentinel.ratelimiter.filter.RateLimitFilter} calls the single-arg
+     * {@link #isAllowed(String)} overload for the global default.
+     *
+     * @param clientId      opaque client identifier (IP, API-key, user-id, …)
+     * @param maxRequests   maximum requests allowed inside the rolling window
+     * @param windowSeconds rolling window size, in seconds
+     * @return {@link RateLimitDecision} containing allowed flag and current count
+     */
+    public RateLimitDecision isAllowed(String clientId, int maxRequests, int windowSeconds) {
+        long windowMs = Duration.ofSeconds(windowSeconds).toMillis();
         long now      = System.currentTimeMillis();
-        long winStart = now - WINDOW_MS;
+        long winStart = now - windowMs;
 
         List<Long> result = redisTemplate.execute(
                 script,
                 Collections.singletonList("rate_limit:" + clientId),
                 String.valueOf(now),
                 String.valueOf(winStart),
-                String.valueOf(MAX_REQUESTS),
-                String.valueOf(WINDOW_MS)
+                String.valueOf(maxRequests),
+                String.valueOf(windowMs)
         );
 
         boolean allowed = result != null && result.get(0) == 1L;
-        long    count   = result != null ? result.get(1) : MAX_REQUESTS;
+        long    count   = result != null ? result.get(1) : maxRequests;
 
-        return new RateLimitDecision(allowed, (int) Math.max(0, MAX_REQUESTS - count));
+        return new RateLimitDecision(allowed, (int) Math.max(0, maxRequests - count));
     }
 
     /** Value object returned to callers so they can populate response headers. */

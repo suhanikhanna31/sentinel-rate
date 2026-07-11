@@ -2,6 +2,7 @@ package com.sentinel.ratelimiter.aspect;
 
 import com.sentinel.ratelimiter.annotation.RateLimit;
 import com.sentinel.ratelimiter.service.RateLimiterService;
+import com.sentinel.ratelimiter.service.RateLimiterService.RateLimitDecision;
 import jakarta.servlet.http.HttpServletRequest;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -31,8 +32,9 @@ public class RateLimitAspect {
             ? clientIp
             : rateLimit.keyPrefix() + ":" + clientIp;
 
-        boolean allowed = rateLimiterService.isAllowed(key, rateLimit.requests(), rateLimit.windowSeconds());
-        if (!allowed) {
+        RateLimitDecision decision =
+                rateLimiterService.isAllowed(key, rateLimit.requests(), rateLimit.windowSeconds());
+        if (!decision.allowed()) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Rate limit exceeded");
         }
         return joinPoint.proceed();

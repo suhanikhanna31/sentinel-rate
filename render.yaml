@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      # jacoco-maven-plugin's "check" goal is bound to the verify phase in pom.xml, so this
+      # step fails outright if line coverage drops below jacoco.line.coverage.minimum. The
+      # old separate "enforce coverage" step here used to just grep-and-echo a raw
+      # instruction count with a `|| echo "0"` fallback — it never actually failed the build.
+      - name: Build & run tests (enforces JaCoCo coverage gate)
+        working-directory: rate-limiter-service/rate-limiter
+        run: ./mvnw verify -B
+
+      - name: Upload JaCoCo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: rate-limiter-service/rate-limiter/target/site/jacoco/
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t sentinel-rate:ci .
+
+      - name: Smoke-test container
+        run: |
+          docker run -d --name sentinel-redis -p 6379:6379 redis:7-alpine
+          docker run -d --name sentinel-app \
+            --link sentinel-redis:redis \
+            -e SPRING_DATA_REDIS_HOST=redis \
+            -p 8080:8080 sentinel-rate:ci
+          sleep 8
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+          echo "Health check returned HTTP $STATUS"
+          [ "$STATUS" = "200" ]
+
+      - name: Cleanup containers
+        if: always()
+        run: |
+          docker rm -f sentinel-app sentinel-redis || true

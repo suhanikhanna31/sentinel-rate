@@ -1,6 +1,7 @@
 package com.sentinel.ratelimiter.filter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sentinel.ratelimiter.config.RateLimitDefaults;
 import com.sentinel.ratelimiter.dto.RateLimitResponse;
 import com.sentinel.ratelimiter.metrics.RateLimitMetrics;
 import com.sentinel.ratelimiter.service.AbuseDetectionService;
@@ -20,9 +21,6 @@ import java.io.IOException;
 
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
-
-    private static final int MAX_REQUESTS = 100;
-    private static final int WINDOW_SECS = 60;
 
     private static final String HEADER_LIMIT = "X-RateLimit-Limit";
     private static final String HEADER_REM = "X-RateLimit-Remaining";
@@ -76,9 +74,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
         RateLimitDecision decision = rateLimiterService.isAllowed(clientId);
 
         long resetEpoch =
-                (System.currentTimeMillis() / 1000) + WINDOW_SECS;
+                (System.currentTimeMillis() / 1000) + RateLimitDefaults.DEFAULT_WINDOW_SECONDS;
 
-        response.setIntHeader(HEADER_LIMIT, MAX_REQUESTS);
+        response.setIntHeader(HEADER_LIMIT, RateLimitDefaults.DEFAULT_MAX_REQUESTS);
         response.setIntHeader(HEADER_REM, decision.remaining());
         response.setLongHeader(HEADER_RESET, resetEpoch);
 
@@ -95,7 +93,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
             abuseDetectionService.recordViolation(clientId);
 
-            response.setIntHeader(HEADER_RETRY, WINDOW_SECS);
+            response.setIntHeader(HEADER_RETRY, RateLimitDefaults.DEFAULT_WINDOW_SECONDS);
 
             rejectWith(
                     response,
