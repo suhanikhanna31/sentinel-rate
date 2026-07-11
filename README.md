@@ -10,8 +10,23 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker)](https://www.docker.com/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-Deployed-326CE5?style=flat-square&logo=kubernetes)](https://kubernetes.io/)
 [![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-black?style=flat-square&logo=githubactions)](https://github.com/features/actions)
+[![Live Demo](https://img.shields.io/badge/Live-sentinel--rate.onrender.com-success?style=flat-square&logo=render)](https://sentinel-rate.onrender.com/health)
 
 </div>
+
+---
+
+## 🌐 Live Demo
+
+**[https://sentinel-rate.onrender.com](https://sentinel-rate.onrender.com/health)**
+
+```bash
+curl -i https://sentinel-rate.onrender.com/health
+```
+
+A couple of things worth knowing before you click:
+- **Cold starts**: this runs on Render's free tier, which spins down after ~15 minutes of inactivity. The first request after idle time can take 30–60 seconds to respond while the instance wakes up — that's expected, not a bug.
+- **Known gap**: the `/admin/*` endpoints (unblocking a client, reading another client's audit history) currently have no authentication in front of them. That's a deliberate, documented tradeoff for a portfolio deployment rather than an oversight — see [Security Notes](#-security-notes) below.
 
 ---
 
@@ -36,6 +51,228 @@ It's a portfolio/practice project — built solo, not battle-tested in productio
 | **Kubernetes Ready** | Full deployment, service, and ConfigMap manifests for rate-limiter + Redis |
 | **CI/CD Pipeline** | GitHub Actions — Redis service container, JUnit 5, an enforced JaCoCo minimum-coverage gate, Docker build + smoke test |
 | **Smart Client ID Resolution** | `X-Forwarded-For` → remote address fallback, works transparently behind load balancers |
+
+---
+
+## 🏗️ Architecture
+
+```
+Client Request
+      │
+      ▼
+┌──────────────────────────┐
+│     RateLimitFilter      │  ← Runs before every controller
+│    (Servlet Filter)      │  ← Sliding-window check via atomic Lua
+│                          │  ← Tiered abuse detection + blocking
+│                          │  ← Injects X-RateLimit-* response headers
+└───────────┬──────────────┘
+            │ allowed
+            ▼
+┌──────────────────────────┐
+│  @RateLimit AOP Advice   │  ← Per-endpoint overrides via annotation
+│  (Spring AOP)            │  ← Delegates to same core limiter
+└───────────┬──────────────┘
+            │
+            ▼
+┌──────────────────────────┐
+│      Controller          │  ← Thin; zero rate-limit logic here
+└───────────┬──────────────┘
+            │
+            ▼
+┌──────────────────────────┐
+│   Redis (Sorted Set)     │  ← Single atomic Lua script
+│                          │  ← Key: client_ip:endpoint
+│                          │  ← Score: timestamp (ms)
+└──────────────────────────┘
+            │
+            ▼
+┌──────────────────────────┐
+│  Hibernate / JPA         │  ← Persists rate limit events for audit
+└──────────────────────────┘
+```
+
+---
+
+## 🔑 Design Decisions
+
+| Concern | Decision | Rationale |
+|---|---|---|
+| **Algorithm** | Sliding window (sorted set) | No burst spike at window boundary vs. fixed-window |
+| **Atomicity** | Lua script | Single round-trip; eliminates check-then-act race condition |
+| **Enforcement layer** | Servlet filter | Runs before controllers; one centralised place to change |
+| **Per-endpoint config** | `@RateLimit` + Spring AOP | Zero controller coupling; declarative and composable |
+| **Client identity** | `X-Forwarded-For` → remote addr | Transparent behind reverse proxies and load balancers |
+| **Abuse deterrence** | 3-tier progressive blocks | Proportional escalation; resists retry storms |
+| **Observability** | Micrometer + Actuator | Drop-in Prometheus/Grafana integration |
+| **Audit trail** | Hibernate persistence | Rate limit events queryable for analytics and compliance |
+
+---
+
+## 📡 Response Headers
+
+Every response includes rate limit metadata for clients:
+
+| Header | Description |
+|---|---|
+| `X-RateLimit-Limit` | Maximum requests allowed per window |
+| `X-RateLimit-Remaining` | Requests left in the current window |
+| `X-RateLimit-Reset` | Unix epoch timestamp when the window resets |
+| `Retry-After` | Seconds until next allowed request (only on `429`) |
+
+---
+
+## ⚡ Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/suhanikhanna31/sentinel-rate.git
+cd sentinel-rate
+
+# Start Redis + app with Docker Compose
+docker-compose up --build
+
+# Hit the health endpoint
+curl -i http://localhost:8080/health
+
+# Trigger rate limiting (run repeatedly)
+curl -i http://localhost:8080/api/your-endpoint
+
+# Unblock a client (admin endpoint)
+curl -X DELETE http://localhost:8080/admin/block/127.0.0.1
+```
+
+---
+
+## 🧪 Running Tests
+
+```bash
+cd rate-limiter-service/rate-limiter
+
+# Run tests with coverage report
+./mvnw verify
+
+# JaCoCo report generated at:
+# target/site/jacoco/index.html
+```
+
+**What's covered:**
+- `RateLimiterService` and `AbuseDetectionService` — integration tests against a real Redis instance (`RateLimiterIntegrationTest`), plus isolated unit tests for `AbuseDetectionService`'s tier-boundary logic (`AbuseDetectionServiceTest`)
+- `RateLimitFilter` — MockMvc tests covering allowed/blocked/rate-limited paths and header injection (`RateLimitFilterTest`)
+- `EventPersistenceService` — unit tests with mocked repositories covering tier mapping, delegation, and the pruning cutoff (`EventPersistenceServiceTest`)
+
+**What's still thin:** `RateLimitAspect` (the `@RateLimit` annotation's AOP advice) and the admin endpoints on `RateLimiterController` (`/admin/audit/*`, `/admin/block/*`) don't have dedicated tests yet — they're exercised only indirectly through the context-load test. That's the honest gap right now.
+
+---
+
+## 📊 Load Testing
+
+```bash
+# Requires k6 — https://k6.io/docs/getting-started/installation/
+k6 run scripts/load-test.js
+```
+
+---
+
+## ☸️ Kubernetes Deployment
+
+Full manifests provided for both the rate-limiter service and Redis:
+
+```bash
+# Apply all manifests
+kubectl apply -f k8s/
+
+# Verify pods are running
+kubectl get pods
+```
+
+Manifests include:
+- **Deployment** — rate-limiter service + Redis
+- **Service** — ClusterIP for internal routing
+- **ConfigMap** — externalised configuration (no secrets hardcoded)
+
+---
+
+## ▲ Deployed on Render
+
+The live demo above runs on Render as three separate pieces:
+
+| Service | What it is |
+|---|---|
+| `sentinel-rate` | The Java app, built from the repo's existing `Dockerfile`, free web service tier |
+| `sentinel-rate-redis` | A Render Key Value (Redis-compatible) instance for rate-limit/abuse state, free tier |
+| An existing Render Postgres instance | Reused from another project for the durable audit trail, free tier |
+
+`render.yaml` at the repo root is a [Render Blueprint](https://render.com/docs/infrastructure-as-code) that provisions the web service and the Key Value instance. The Postgres `DB_*` connection variables are intentionally left as `sync: false` in that file rather than provisioned there, since Render's free tier only allows one free Postgres instance per account — so this deployment points at a database created separately rather than the Blueprint creating its own.
+
+**To deploy your own copy:**
+1. Push this repo to GitHub/GitLab
+2. In the Render Dashboard, **New → Blueprint**, point it at your repo
+3. Either provision your own free Postgres separately and fill in the prompted `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` values during the sync, or edit `render.yaml` to add a `databases:` block if you don't already have a free Postgres instance elsewhere on your account
+4. On the web service, set `REDIS_HOST` / `REDIS_PORT` to the *bare* hostname and port from your Key Value instance's Info page (not the full `redis://...` connection string — the app builds the connection from the two pieces separately)
+5. Set `SPRING_PROFILES_ACTIVE=postgres` so the app uses `application-postgres.properties` instead of the in-memory H2 default
+
+A couple of things worth knowing:
+- The app runs with `SPRING_PROFILES_ACTIVE=postgres` on Render (see `application-postgres.properties`), so the audit trail actually persists across deploys — unlike the in-memory H2 default used for local dev and CI.
+- Render's free Postgres tier expires after 30 days; the free Key Value tier has no disk persistence (fine here, since rate-limit counters are meant to be ephemeral and self-expire anyway).
+- A Key Value instance and the web service that talks to it must be in the **same Render region**, or the internal hostname won't resolve.
+- The `k8s/` manifests below are unrelated to this path — use one or the other, not both.
+
+---
+
+## 🔒 Security Notes
+
+This is a portfolio deployment, and there's one gap worth being explicit about rather than hiding: **the `/admin/*` endpoints have no authentication.**
+
+```
+DELETE /admin/block/{clientId}
+GET    /admin/audit/events/{clientId}
+GET    /admin/audit/violations/{clientId}
+GET    /admin/audit/rejected-last-minute/{clientId}
+```
+
+There's no Spring Security dependency in this project, and no filter currently checks who's calling these routes — anyone who finds the URL pattern can unblock a client or read another client's audit history. In a real system this would gate behind proper auth (or at minimum a shared API-key filter) before going anywhere near a public URL. It's left open here as a known, called-out limitation of the demo rather than something discovered later.
+
+---
+
+## 🔄 CI/CD Pipeline
+
+GitHub Actions pipeline (`.github/workflows/ci.yml`) runs on every push:
+
+```
+Push → Spin up Redis service container
+     → Run JUnit 5 test suite
+     → Enforce JaCoCo minimum line-coverage gate (see pom.xml for the current threshold)
+     → Build Docker image
+     → Smoke-test container via /health endpoint
+```
+
+---
+
+## 🛠️ Tech Stack
+
+- **Java 17** + **Spring Boot 4**
+- **Redis** (sorted sets + Lua scripting)
+- **Spring AOP** (annotation-based rate limiting)
+- **Micrometer + Actuator** (metrics + observability)
+- **Hibernate / JPA** (event persistence)
+- **Docker + Docker Compose**
+- **Kubernetes** (deployment manifests)
+- **GitHub Actions** (CI/CD)
+- **JUnit 5 + JaCoCo** (testing + coverage)
+- **k6** (load testing)
+
+---
+
+## 👩‍💻 Author
+
+**Suhani Khanna**
+[GitHub](https://github.com/suhanikhanna31)
+
+---
+
+<div align="center">
+  <sub>Built with ❤️ and a lot of Redis sorted sets.</sub>
+</div>| **Smart Client ID Resolution** | `X-Forwarded-For` → remote address fallback, works transparently behind load balancers |
 
 ---
 
