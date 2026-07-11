@@ -60,10 +60,12 @@ jobs:
 
       - name: Smoke-test container
         run: |
-          docker run -d --name sentinel-redis -p 6379:6379 redis:7-alpine
+          docker network create sentinel-net
+          docker run -d --name sentinel-redis --network sentinel-net redis:7-alpine
           docker run -d --name sentinel-app \
-            --link sentinel-redis:redis \
-            -e SPRING_DATA_REDIS_HOST=redis \
+            --network sentinel-net \
+            -e SPRING_DATA_REDIS_HOST=sentinel-redis \
+            -e SPRING_DATA_REDIS_PORT=6379 \
             -p 8080:8080 sentinel-rate:ci
 
           echo "Waiting for the app to become healthy..."
@@ -84,3 +86,4 @@ jobs:
         if: always()
         run: |
           docker rm -f sentinel-app sentinel-redis || true
+          docker network rm sentinel-net || true
