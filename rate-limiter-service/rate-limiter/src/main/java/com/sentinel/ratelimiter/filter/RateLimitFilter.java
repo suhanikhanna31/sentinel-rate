@@ -78,7 +78,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
         response.setIntHeader(HEADER_LIMIT, RateLimitDefaults.DEFAULT_MAX_REQUESTS);
         response.setIntHeader(HEADER_REM, decision.remaining());
-        response.setLongHeader(HEADER_RESET, String.valueOf(resetEpoch));
+        response.setHeader(HEADER_RESET, String.valueOf(resetEpoch));
 
         persistenceService.saveRateLimitEvent(
                 clientId,
