@@ -32,16 +32,13 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Build & run tests
+      # jacoco-maven-plugin's "check" goal is bound to the verify phase in pom.xml, so this
+      # step fails outright if line coverage drops below jacoco.line.coverage.minimum. The
+      # old separate "enforce coverage" step here used to just grep-and-echo a raw
+      # instruction count with a `|| echo "0"` fallback — it never actually failed the build.
+      - name: Build & run tests (enforces JaCoCo coverage gate)
         working-directory: rate-limiter-service/rate-limiter
         run: ./mvnw verify -B
-
-      - name: Enforce 80%+ line coverage (JaCoCo)
-        working-directory: rate-limiter-service/rate-limiter
-        run: |
-          COVERAGE=$(grep -oP 'INSTRUCTION.*?<counter.*?covered="\K[0-9]+' \
-            target/site/jacoco/jacoco.xml | head -1 || echo "0")
-          echo "Covered instructions: $COVERAGE"
 
       - name: Upload JaCoCo report
         if: always()
@@ -68,10 +65,20 @@ jobs:
             --link sentinel-redis:redis \
             -e SPRING_DATA_REDIS_HOST=redis \
             -p 8080:8080 sentinel-rate:ci
-          sleep 8
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
-          echo "Health check returned HTTP $STATUS"
-          [ "$STATUS" = "200" ]
+
+          echo "Waiting for the app to become healthy..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check returned HTTP $STATUS after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "App never became healthy within 60s — dumping container logs:"
+          docker logs sentinel-app
+          exit 1
 
       - name: Cleanup containers
         if: always()
