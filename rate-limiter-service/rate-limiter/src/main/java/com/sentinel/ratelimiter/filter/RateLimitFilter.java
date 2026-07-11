@@ -1,6 +1,6 @@
 package com.sentinel.ratelimiter.filter;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jackson.databind.ObjectMapper;
 import com.sentinel.ratelimiter.config.RateLimitDefaults;
 import com.sentinel.ratelimiter.dto.RateLimitResponse;
 import com.sentinel.ratelimiter.metrics.RateLimitMetrics;
