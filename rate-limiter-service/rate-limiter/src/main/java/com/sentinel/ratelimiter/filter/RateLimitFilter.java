@@ -1,6 +1,6 @@
 package com.sentinel.ratelimiter.filter;
 
-import com.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import com.sentinel.ratelimiter.config.RateLimitDefaults;
 import com.sentinel.ratelimiter.dto.RateLimitResponse;
 import com.sentinel.ratelimiter.metrics.RateLimitMetrics;
@@ -78,7 +78,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
         response.setIntHeader(HEADER_LIMIT, RateLimitDefaults.DEFAULT_MAX_REQUESTS);
         response.setIntHeader(HEADER_REM, decision.remaining());
-        response.setLongHeader(HEADER_RESET, resetEpoch);
+        response.setLongHeader(HEADER_RESET, String.valueOf(resetEpoch));
 
         persistenceService.saveRateLimitEvent(
                 clientId,
