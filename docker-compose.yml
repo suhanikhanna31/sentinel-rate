@@ -29,5 +29,15 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  agent-service:
+    build: ./agent-service
+    container_name: sentinel-agent
+    ports:
+      - "8000:8000"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SENTINEL_AGENT_MODEL: ${SENTINEL_AGENT_MODEL:-claude-sonnet-4-6}
+    restart: unless-stopped
+
 volumes:
   redis_data:
