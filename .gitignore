@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Agent service (Python) ###
+agent-service/.venv/
+agent-service/__pycache__/
+agent-service/**/__pycache__/
+agent-service/.pytest_cache/
+agent-service/.env
+k8s/agent-secret.yaml
