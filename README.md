@@ -9,6 +9,7 @@
 [![Redis](https://img.shields.io/badge/Redis-Sorted%20Sets-red?style=flat-square&logo=redis)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker)](https://www.docker.com/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-Deployed-326CE5?style=flat-square&logo=kubernetes)](https://kubernetes.io/)
+[![LangGraph](https://img.shields.io/badge/Agentic%20AI-LangGraph-1C3C3C?style=flat-square)](https://langchain-ai.github.io/langgraph/)
 [![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-black?style=flat-square&logo=githubactions)](https://github.com/features/actions)
 [![Live Demo](https://img.shields.io/badge/Live-sentinel--rate.onrender.com-success?style=flat-square&logo=render)](https://sentinel-rate.onrender.com/health)
 
@@ -53,6 +54,7 @@ It's a portfolio/practice project — built solo, not battle-tested in productio
 | **Kubernetes Ready** | Full deployment, service, and ConfigMap manifests for rate-limiter + Redis |
 | **CI/CD Pipeline** | GitHub Actions — Redis service container, JUnit 5, an enforced JaCoCo minimum-coverage gate, Docker build + smoke test |
 | **Smart Client ID Resolution** | `X-Forwarded-For` → remote address fallback, works transparently behind load balancers |
+| **Agentic AI Investigation** | Separate FastAPI + LangGraph service (`agent-service/`) that turns abuse events into an explainable multi-step risk assessment, with an LLM (Claude) or an offline heuristic fallback |
 
 ---
 
@@ -90,7 +92,13 @@ Client Request
             ▼
 ┌──────────────────────────┐
 │  Hibernate / JPA         │  ← Persists rate limit events for audit
-└──────────────────────────┘
+└───────────┬──────────────┘
+            │ on repeated violations
+            ▼
+┌──────────────────────────┐
+│  agent-service (LangGraph) │ ← gather_context → assess_risk → policy_decision
+│  FastAPI, separate process │ ← LLM (Claude) or offline heuristic
+└──────────────────────────┘  ← → escalate / auto_resolve recommendation
 ```
 
 ---
@@ -175,6 +183,32 @@ k6 run scripts/load-test.js
 
 ---
 
+## 🤖 Agentic AI Layer
+
+`agent-service/` is a standalone FastAPI service that adds an agentic reasoning step on top of the Java service's abuse-detection data, built with **LangGraph**:
+
+```
+gather_context ──▶ assess_risk ──▶ policy_decision ──▶ escalate ──────▶ END
+                     (LLM or            │
+                    heuristic)          └──────────────▶ auto_resolve ─▶ END
+```
+
+Rather than one opaque model call, the graph runs multiple explainable steps: derive signal from recent events, get a risk assessment (Claude via the Anthropic API, or a deterministic offline heuristic with an identical output shape when no API key is configured), then apply a hard policy guardrail on top (10+ violations is always escalated, regardless of what the model said) before deciding whether the case needs a human.
+
+```bash
+cd agent-service
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+
+curl -X POST localhost:8000/agent/investigate \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"10.0.0.5","violation_count":11,"endpoint":"/api/orders","window_seconds":60,"recent_events":[]}'
+```
+
+See [`agent-service/README.md`](agent-service/README.md) for the full API and design notes. The service ships with its own Dockerfile, is wired into `docker-compose.yml`, has k8s manifests in `k8s/agent-*.yaml`, and is tested and built in CI without ever requiring a real LLM API key (`ANTHROPIC_API_KEY` is intentionally left unset in CI so the offline heuristic path is what gets exercised).
+
+---
+
 ## ☸️ Kubernetes Deployment
 
 Full manifests provided for both the rate-limiter service and Redis:
@@ -191,6 +225,7 @@ Manifests include:
 - **Deployment** — rate-limiter service + Redis
 - **Service** — ClusterIP for internal routing
 - **ConfigMap** — externalised configuration (no secrets hardcoded)
+- **`agent-deployment.yaml` / `agent-service.yaml`** — the LangGraph agent service, with its `ANTHROPIC_API_KEY` env var sourced from an *optional* Secret (`agent-secret.example.yaml`) so the pod still comes up healthy in offline heuristic mode if the Secret was never created
 
 ---
 
@@ -245,14 +280,29 @@ This wasn't the initial state of the deployment — the first live version had t
 
 ## 🔄 CI/CD Pipeline
 
-GitHub Actions pipeline (`.github/workflows/ci.yml`) runs on every push:
+**CI** (`.github/workflows/ci.yml`) runs on every push/PR, across three parallel-ish jobs:
 
 ```
-Push → Spin up Redis service container
-     → Run JUnit 5 test suite
-     → Enforce JaCoCo minimum line-coverage gate (see pom.xml for the current threshold)
-     → Build Docker image
-     → Smoke-test container via /health endpoint
+build-and-test  → Spin up Redis service container
+                → Run JUnit 5 test suite
+                → Enforce JaCoCo minimum line-coverage gate (see pom.xml for the current threshold)
+
+agent-service   → Install agent-service Python deps
+                → Run pytest against the LangGraph graph + FastAPI endpoints
+                  (no ANTHROPIC_API_KEY set — exercises the offline heuristic path)
+                → Build the agent's Docker image
+
+docker-smoke    → Build the rate-limiter's Docker image
+                → Smoke-test the container via /health endpoint
+```
+
+**CD** (`.github/workflows/cd.yml`) runs after CI succeeds on `main`, or on a `v*.*.*` tag push:
+
+```
+publish  → Build & push both images (sentinel-rate, sentinel-agent) to GHCR
+         → Tagged :latest, :<short-sha>, and semver on version tags
+deploy   → Gated behind a `production` GitHub Environment (manual approval)
+         → Placeholder step — wire in kubectl/Render/ArgoCD for your target
 ```
 
 ---
@@ -266,9 +316,11 @@ Push → Spin up Redis service container
 - **Hibernate / JPA** (event persistence)
 - **Docker + Docker Compose**
 - **Kubernetes** (deployment manifests)
-- **GitHub Actions** (CI/CD)
+- **GitHub Actions** (CI + separate CD pipeline, GHCR image publishing)
 - **JUnit 5 + JaCoCo** (testing + coverage)
 - **k6** (load testing)
+- **LangGraph + FastAPI + Anthropic API** (agentic abuse-investigation service, `agent-service/`)
+- **pytest** (agent-service test suite)
 
 ---
 
