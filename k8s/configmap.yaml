@@ -6,3 +6,4 @@ data:
   redis.host: redis-service
   rate.limit.requests: "100"
   rate.limit.window.seconds: "60"
+  agent.model: "claude-sonnet-4-6"
