@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-agent
+  labels:
+    app: sentinel-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sentinel-agent
+  template:
+    metadata:
+      labels:
+        app: sentinel-agent
+    spec:
+      containers:
+        - name: agent-service
+          image: sentinel-agent:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SENTINEL_AGENT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: sentinel-config
+                  key: agent.model
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-agent-secrets
+                  key: anthropic-api-key
+                  optional: true # agent runs in offline heuristic mode if absent
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "150m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
