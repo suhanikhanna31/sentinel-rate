@@ -26,7 +26,7 @@ curl -i https://sentinel-rate.onrender.com/health
 ```
 
 A couple of things worth knowing before you click:
-- **Cold starts**: this runs on Render's free tier, which spins down after ~15 minutes of inactivity. The first request after idle time can take 30–60 seconds to respond while the instance wakes up — that's expected, not a bug.
+- **Cold starts**: this runs on Render's free tier, which spins down after ~15 minutes of inactivity. The first request after idle time can take 30–60 seconds to respond while the instance wakes up — that's expected, not a bug. The Neon database behind the audit trail also pauses when idle and wakes on the next query.
 - **Admin endpoints are locked**: `/admin/*` routes require an `X-Admin-Api-Key` header matching a server-side secret (see [Security Notes](#-security-notes)) — they were open in an earlier iteration of this deployment and have since been closed off.
 - Visiting the bare root URL returns a small JSON status payload rather than a 404 — see `RootController`.
 
@@ -231,26 +231,27 @@ Manifests include:
 
 ## ▲ Deployed on Render
 
-The live demo above runs on Render as three separate pieces:
+The live demo above runs on Render and Neon as three separate pieces:
 
 | Service | What it is |
 |---|---|
 | `sentinel-rate` | The Java app, built from the repo's existing `Dockerfile`, free web service tier |
 | `sentinel-rate-redis` | A Render Key Value (Redis-compatible) instance for rate-limit/abuse state, free tier |
-| An existing Render Postgres instance | Reused from another project for the durable audit trail, free tier |
+| A [Neon](https://neon.com) Postgres project (`sentinel-rate`, AWS us-east-1) | The durable audit trail (`rate_limit_events`, `abuse_violations` tables), free tier. Hosted outside Render because Render's free Postgres databases expire after 30 days |
 
-`render.yaml` at the repo root is a [Render Blueprint](https://render.com/docs/infrastructure-as-code) that provisions the web service and the Key Value instance. The Postgres `DB_*` connection variables are intentionally left as `sync: false` in that file rather than provisioned there, since Render's free tier only allows one free Postgres instance per account — so this deployment points at a database created separately rather than the Blueprint creating its own.
+`render.yaml` at the repo root is a [Render Blueprint](https://render.com/docs/infrastructure-as-code) that provisions the web service and the Key Value instance. The Postgres `DB_*` connection variables are intentionally left as `sync: false` in that file rather than provisioned there, since the database lives on Neon, not Render — so the Blueprint prompts for those values instead of creating a database of its own.
 
 **To deploy your own copy:**
 1. Push this repo to GitHub/GitLab
 2. In the Render Dashboard, **New → Blueprint**, point it at your repo
-3. Either provision your own free Postgres separately and fill in the prompted `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` values during the sync, or edit `render.yaml` to add a `databases:` block if you don't already have a free Postgres instance elsewhere on your account
+3. Provision a Postgres database (this deployment uses Neon's free tier) and fill in the prompted `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` values during the sync. Use the host only (no `postgresql://` prefix or port), `5432` for the port, and the direct (non-pooled) connection details. Neon only accepts TLS connections, so make sure the JDBC URL in `application-postgres.properties` requires SSL (`sslmode=require`). Alternatively, edit `render.yaml` to add a `databases:` block to use a Render Postgres instance instead
 4. On the web service, set `REDIS_HOST` / `REDIS_PORT` to the *bare* hostname and port from your Key Value instance's Info page (not the full `redis://...` connection string — the app builds the connection from the two pieces separately)
 5. Set `SPRING_PROFILES_ACTIVE=postgres` so the app uses `application-postgres.properties` instead of the in-memory H2 default
 
 A couple of things worth knowing:
 - The app runs with `SPRING_PROFILES_ACTIVE=postgres` on Render (see `application-postgres.properties`), so the audit trail actually persists across deploys — unlike the in-memory H2 default used for local dev and CI.
-- Render's free Postgres tier expires after 30 days; the free Key Value tier has no disk persistence (fine here, since rate-limit counters are meant to be ephemeral and self-expire anyway).
+- The audit trail lives in Neon rather than Render Postgres because Render's free Postgres databases expire after 30 days (an earlier version of this deployment hit that). The free Key Value tier has no disk persistence, which is fine here, since rate-limit counters are meant to be ephemeral and self-expire anyway.
+- Neon suspends idle compute, so the first database query after a quiet period can add a short delay on top of Render's own cold start.
 - A Key Value instance and the web service that talks to it must be in the **same Render region**, or the internal hostname won't resolve.
 - The `k8s/` manifests below are unrelated to this path — use one or the other, not both.
 
